@@ -1,69 +1,147 @@
-import React, { useEffect, useState } from 'react';
-import io from 'socket.io-client';
-import { v4 as uuidv4 } from 'uuid';
+import { useState, useEffect } from 'react';
+import {connect} from 'socket.io-client';
 
-const socket = io('http://localhost:443', {
+const SERVER_ADDRESS = 'localhost';
+const wsURL = `ws://${SERVER_ADDRESS}:443`;
+
+interface URLInfo {
+    id: number;
+    link: string;
+}
+
+interface ContentInfo {
+    id: string;
+    filename: string;
+    fileSize: number;
+    fileExt: string;
+}
+
+const socket = connect(wsURL, {
     path: '/wss'
 });
 
 const App: React.FC = () => {
-    const [urls, setUrls] = useState<string[]>([]);
-    const [resourceUrl, setResourceUrl] = useState<string | null>(null);
+    const [searchTerm, setSearchTerm] = useState<string>('');
+    const [urls, setUrls] = useState<URLInfo[]>([]);
+    const [localContent, setLocalContent] = useState<string[]>([]);
+    const [contentInfo, setContentInfo] = useState<ContentInfo | null>(null);
+    const [buffer, setBuffer] = useState<ArrayBuffer[]>([]);
+    const [tempSize, setTempSize] = useState<number>(0);
 
     useEffect(() => {
-        socket.on('message', (message: string) => {
-            const msg = JSON.parse(message);
 
-            if (msg.type === 'links') {
-                setUrls(msg.links);
-            } else if (msg.type === 'resource') {
-                setResourceUrl(msg.url);
+        socket.on('urlsInfo', (data: {urls: URLInfo[]}) => {
+            setUrls(data.urls);
+        });
+
+        socket.on('contentInfo', (data: ContentInfo) => {
+            setContentInfo(data);
+        }).on('error', (data: { id: string; data: string }) => {
+            alert(`Ошибка: ${data.data}`);
+        }).on('file', (data: ArrayBuffer) => {
+            const dataArray = new Uint8Array(data);
+            if (dataArray.byteLength >= tempSize) {
+                setBuffer((prev) => [...prev, dataArray]);
+                setTempSize(dataArray.byteLength);
+            } else {
+                setBuffer((prev) => [...prev, dataArray]);
+                setTempSize(0);
+                console.log('Загрузка завершена');
+                const jpegFile = new File([new Blob(buffer)], contentInfo?.filename || '', {
+                    type: 'image/jpeg',
+                    lastModified: Date.now(),
+                });
+                const url = URL.createObjectURL(jpegFile);
+                localStorage.setItem(`contentLocalId-${contentInfo?.id}`, url);
+                setLocalContent((prev) => [...prev, url]);
             }
         });
 
+        console.log('useEffect')
+
         return () => {
-            socket.off('message');
+            socket.off();
         };
-    }, []);
 
-    const requestUrls = () => {
-        const requestId = uuidv4();
-        socket.send(JSON.stringify({ type: 'urls', id: requestId }));
+    }, [buffer, contentInfo?.filename, contentInfo?.id, tempSize]);
+
+    const handleSearch = (e: React.FormEvent) => {
+        e.preventDefault();
+        socket?.send(JSON.stringify({ action: 'GET_URLS', data: searchTerm }));
     };
 
-    const requestResource = (url: string) => {
-        const requestId = uuidv4();
-        socket.send(JSON.stringify({ type: 'resource', id: requestId, name: url }));
+
+
+    const [id, setId] = useState('')
+
+    const handleDownload = (id: number) => {
+        socket?.send(JSON.stringify({ action: 'GET_CONTENT', data: id.toString() }));
     };
+
+    console.log(id);
+
+    useEffect(() => {
+        if (!id) return
+        handleDownload(Number(id))
+        setId('');
+    }, [buffer, id]);
+
+    console.log(buffer)
 
     return (
-        <div className="container mx-auto text-center p-4">
-            <h1 className="text-2xl font-bold mb-4">URL Downloader</h1>
-            <button
-                className="bg-blue-500 text-white py-2 px-4 rounded mb-4"
-                onClick={requestUrls}
-            >
-                Request URLs
-            </button>
+        <div className="container mx-auto p-4">
+            <h3 className="text-lg font-bold mb-2">Введите ключевое слово!</h3>
+            <form onSubmit={handleSearch} className="mb-4">
+                <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="border p-2 mr-2"
+                    placeholder="Ключевое слово"
+                    maxLength={16}
+                />
+                <button type="submit" className="bg-blue-500 text-white p-2">Поиск</button>
+            </form>
 
-            <div className="mb-4">
-                {urls.map((url, index) => (
-                    <div key={index} className="mb-2">
-            <span className="text-blue-600 cursor-pointer" onClick={() => requestResource(url)}>
-              {url}
-            </span>
+            <h3 className="text-lg font-bold mb-2">Результат поиска URL на сервере по ключевому слову</h3>
+            <div id="divRemote" className="mb-4">
+                {urls?.map((url) => (
+                    <div key={url.id} className="mb-2">
+                        <p>{window.location.href + url.link}</p>
+                        <button
+                            onClick={() => {
+                                setId(url.id.toString())
+                            }}
+                            className="bg-green-500 text-white p-2"
+                        >
+                            Скачать контент
+                        </button>
                     </div>
                 ))}
             </div>
 
-            {resourceUrl && (
-                <div className="mt-4">
-                    <h2 className="text-xl font-bold">Resource</h2>
-                    <a href={resourceUrl} className="text-blue-600" download>
-                        Download Resource
-                    </a>
-                </div>
-            )}
+            <h3 className="text-lg font-bold mb-2">Список загруженного контента</h3>
+            <div id="divLocal">
+                {localContent.map((content, index) => (
+                    <div key={index} className="mb-2">
+                        <p>{content}</p>
+                        <button
+                            onClick={() => window.open(content)}
+                            className="bg-yellow-500 text-white p-2"
+                        >
+                            Посмотреть контент
+                        </button>
+                    </div>
+                ))}
+            </div>
+
+            <h3></h3>
+            <input
+                type="button"
+                onClick={() => alert("Стол, Стул, Машина")}
+                value="Вывести ключевые слова, чтобы не гадать!"
+                className="bg-gray-500 text-white p-2"
+            />
         </div>
     );
 };

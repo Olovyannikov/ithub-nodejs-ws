@@ -1,89 +1,92 @@
 import express from 'express';
-import {createServer} from 'http';
+import http from 'http';
 import {Server} from 'socket.io';
-import {createReadStream, statSync} from 'fs';
+import {v4 as uuid} from 'uuid';
 import {getResourceFilename, getURLS} from './shared/api';
+import {createReadStream, statSync} from 'fs';
+import path from 'path';
+import {fileURLToPath} from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const port = 443;
-const resourcePath = '../public/';
-
+const resourcePath = path.join(__dirname, '../public');
 const app = express();
-const httpServer = createServer(app);
-const io = new Server(httpServer, {
-    path: '/wss'
-});
 
-app.use(express.static('./public'));
-
-httpServer.listen(port, () => {
-    console.log(`HTTP сервер запущен на порту ${port}`);
-    console.log(`Socket.IO сервер запущен на пути /wss`);
+const server = http.createServer(app);
+const io = new Server(server, {
+    path: "/wss",
+    cors: {
+        origin: '*'
+    }
 });
 
 io.on('connection', (socket) => {
-    console.log('Новое соединение установлено');
-
-    socket.on('message', async (message: string) => {
-        let msg: {type: string, id?: string, name?: string};
-
-        try {
-            msg = JSON.parse(message);
-        } catch (e) {
-            console.error('Ошибка разбора сообщения:', e);
-            return;
-        }
-
-        switch (msg.type) {
-            case 'getResourceFilename': {
-                if (!msg.id) {
-                    socket.emit('error', 'Message missing required field: id');
-                    return;
-                }
-
-                const filename = getResourceFilename(msg.id);
-
-                if (!filename) {
-                    socket.emit('error', 'Resource not found');
-                    return;
-                }
-
-                const filePath = resourcePath + filename;
-                const fileStat = statSync(filePath);
-
-                socket.emit('fileInfo', {
-                    name: filename,
-                    size: fileStat.size
-                });
-
-                const readStream = createReadStream(filePath);
-                readStream.on('data', (chunk) => {
-                    socket.emit('file', chunk);
-                });
-                readStream.on('end', () => {
-                    socket.emit('end', 'File stream end');
-                });
-                readStream.on('error', (err) => {
-                    socket.emit('error', 'File stream error: ' + err.message);
-                });
-                break;
-            }
-            case 'add': {
-                if (!msg.name) {
-                    socket.emit('error', 'Message missing required field: name');
-                    return;
-                }
-
-                const name = msg.name.toLowerCase();
-                const urls_data = await getURLS(name);
-                socket.emit('response', urls_data);
-                break;
-            }
-            default:
-                console.log('Неизвестный тип сообщения:', msg.type);
-        }
-    });
+    const clientId = uuid();
+    console.log(`Новый пользователь: ${clientId}`);
 
     socket.on('disconnect', () => {
-        console.log('Пользователь отключился');
+        console.log(`Пользователь отключился: ${clientId}`);
     });
+
+    socket.on('message', async (message) => {
+        try {
+            const jsonMessage = JSON.parse(message);
+            const urls = await getURLS(jsonMessage.data);
+            console.log({jsonMessage, urls})
+
+            switch (jsonMessage.action) {
+                case 'GET_URLS':
+                    console.log(`Получено сообщение: ${jsonMessage.data}`);
+                    if (urls.length > 0) {
+                        socket.emit('urlsInfo', {urls});
+                    } else {
+                        socket.emit('message', {data: 'empty'});
+                        console.log('Нет данных по введенному ключевому слову.');
+                    }
+                    break;
+                case 'GET_CONTENT':
+                    try {
+                        const contentInfo = await getContentInfo(jsonMessage.data);
+                        socket.emit('contentInfo', {data: contentInfo});
+
+                        const readStream = createReadStream(path.join(resourcePath, contentInfo.filename));
+                        readStream.on('readable', () => {
+                            let buf;
+                            while ((buf = readStream.read()) !== null) {
+                                socket.emit('file', buf);
+                            }
+                        });
+                        readStream.on('end', () => {
+                            socket.emit('fileEnd');
+                            console.log('Передача данных завершена');
+                        });
+                    } catch (error) {
+                        socket.emit('error', {data: 'empty'});
+                    }
+                    break;
+                default:
+                    socket.emit('message', 'empty');
+                    console.log('Неизвестный запрос на сервер');
+                    break;
+            }
+        } catch (error) {
+            console.log('Error', error);
+        }
+    });
+});
+
+async function getContentInfo(id: string) {
+    console.log(`Запрошен контент с id ${id}`);
+    const filename = getResourceFilename(id);
+    console.log(filename);
+    const fileSize = statSync(path.join(resourcePath, filename)).size;
+    console.log('fsize', fileSize)
+    const fileExt = path.extname(filename).slice(1);
+    return {id, filename, fileSize, fileExt};
+}
+
+server.listen(port, () => {
+    console.log(`Сервер запущен на ${port} порту`);
 });
